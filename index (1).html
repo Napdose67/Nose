@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corte · editor de video</title>
+<style>
+:root{--bg:#1b2130;--panel:#252c3f;--line:#37405a;--text:#eef1f7;--mute:#9aa4bd;--accent:#f2b134;--ok:#3fb8af;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:16px 16px 40px}
+h1{font-size:1.5rem;margin:4px 0 2px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 16px}
+.stage{background:#000;border-radius:10px;overflow:hidden;position:relative;border:1px solid var(--line)}
+canvas{display:block;width:100%;height:auto;max-height:60vh;margin:0 auto;object-fit:contain}
+.empty{padding:48px 16px;text-align:center;color:var(--mute)}
+video{display:none}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:12px}
+.panel h2{font-size:1rem;margin:0 0 10px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+label{display:block;color:var(--mute);font-size:.88rem;margin:10px 0 4px}
+input[type=range]{width:100%;accent-color:var(--accent)}
+input[type=text]{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+input[type=color]{width:48px;height:40px;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:2px}
+button,.btn{font:inherit;font-weight:600;border:0;border-radius:8px;padding:11px 16px;cursor:pointer;background:var(--line);color:var(--text);display:inline-block}
+button.main{background:var(--accent);color:#1b2130}
+button:disabled{opacity:.4;cursor:not-allowed}
+:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+.track{position:relative;height:36px;background:var(--bg);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.sel{position:absolute;top:0;bottom:0;background:rgba(242,177,52,.28);border-left:3px solid var(--accent);border-right:3px solid var(--accent)}
+.head{position:absolute;top:0;bottom:0;width:2px;background:var(--text)}
+.times{display:flex;justify-content:space-between;color:var(--mute);font-size:.88rem;margin-top:6px;font-variant-numeric:tabular-nums}
+#status{color:var(--ok);min-height:1.4em;margin:10px 0 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Corte</h1>
+  <p class="sub">Recorta tu video, ponle texto y descárgalo. Todo ocurre en tu dispositivo.</p>
+
+  <div class="stage">
+    <div class="empty" id="empty">Elige un video para empezar</div>
+    <canvas id="c" hidden></canvas>
+    <video id="v" playsinline preload="auto"></video>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label class="btn main" style="margin:0" for="file">Elegir video</label>
+      <input id="file" type="file" accept="video/*" hidden>
+      <button id="play" disabled>Reproducir</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recortar</h2>
+    <div class="track"><div class="sel" id="sel"></div><div class="head" id="head"></div></div>
+    <label for="s">Inicio</label>
+    <input id="s" type="range" min="0" max="1" step="0.05" value="0" disabled>
+    <label for="e">Final</label>
+    <input id="e" type="range" min="0" max="1" step="0.05" value="1" disabled>
+    <div class="times"><span id="tS">0:00.0</span><span id="tL">Duración: 0:00.0</span><span id="tE">0:00.0</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Texto</h2>
+    <label for="txt" style="margin-top:0">Escribe tu texto</label>
+    <input id="txt" type="text" placeholder="Ej: Mi primer video">
+    <div class="row" style="margin-top:10px">
+      <div style="flex:1;min-width:140px"><label for="sz">Tamaño</label><input id="sz" type="range" min="3" max="20" value="9"></div>
+      <div style="flex:1;min-width:140px"><label for="py">Posición vertical</label><input id="py" type="range" min="5" max="95" value="85"></div>
+      <div><label for="col">Color</label><input id="col" type="color" value="#ffffff"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <button id="exp" class="main" disabled>Exportar video</button>
+    <p id="status" role="status"></p>
+    <p class="sub" style="margin:6px 0 0;font-size:.88rem">Al exportar, el video se reproduce mientras se graba. Espera a que termine y se descargará solo.</p>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const v = $('v'), c = $('c'), ctx = c.getContext('2d');
+let dur = 0, rec = null, exporting = false;
+
+const fmt = t => { const m = Math.floor(t / 60), s = (t % 60).toFixed(1).padStart(4, '0'); return m + ':' + s; };
+const range = () => ({ a: +$('s').value, b: +$('e').value });
+const setStatus = t => { $('status').textContent = t; };
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  v.src = URL.createObjectURL(f);
+  setStatus('');
+};
+
+v.onloadedmetadata = () => {
+  dur = v.duration;
+  const k = Math.min(1, 1280 / v.videoWidth);
+  c.width = Math.round(v.videoWidth * k);
+  c.height = Math.round(v.videoHeight * k);
+  c.hidden = false;
+  $('empty').hidden = true;
+  for (const id of ['s', 'e']) { $(id).max = dur; $(id).disabled = false; }
+  $('s').value = 0; $('e').value = dur;
+  $('play').disabled = false; $('exp').disabled = false;
+  v.currentTime = 0.01;
+  updateTimes();
+};
+
+function updateTimes() {
+  let { a, b } = range();
+  if (a > b - 0.1) { a = Math.max(0, b - 0.1); $('s').value = a; }
+  $('tS').textContent = fmt(a);
+  $('tE').textContent = fmt(b);
+  $('tL').textContent = 'Duración: ' + fmt(Math.max(0, b - a));
+  $('sel').style.left = (a / dur * 100) + '%';
+  $('sel').style.width = ((b - a) / dur * 100) + '%';
+}
+$('s').oninput = () => { updateTimes(); if (v.paused) v.currentTime = +$('s').value; };
+$('e').oninput = () => { updateTimes(); if (v.paused) v.currentTime = +$('e').value; };
+
+$('play').onclick = () => {
+  if (!v.paused) { v.pause(); return; }
+  const { a, b } = range();
+  if (v.currentTime < a || v.currentTime >= b - 0.05) v.currentTime = a;
+  v.play();
+};
+v.onplay = () => { $('play').textContent = 'Pausar'; };
+v.onpause = () => { $('play').textContent = 'Reproducir'; };
+
+function drawText() {
+  const t = $('txt').value.trim();
+  if (!t) return;
+  const size = c.height * $('sz').value / 100;
+  ctx.font = '700 ' + size + 'px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = size / 6;
+  ctx.strokeStyle = 'rgba(0,0,0,.7)';
+  const x = c.width / 2, y = c.height * $('py').value / 100;
+  ctx.strokeText(t, x, y, c.width * 0.94);
+  ctx.fillStyle = $('col').value;
+  ctx.fillText(t, x, y, c.width * 0.94);
+}
+
+function stopAtEnd() {
+  v.pause();
+  if (exporting && rec && rec.state !== 'inactive') rec.stop();
+}
+
+function loop() {
+  if (dur) {
+    ctx.drawImage(v, 0, 0, c.width, c.height);
+    drawText();
+    $('head').style.left = (v.currentTime / dur * 100) + '%';
+    if (!v.paused && v.currentTime >= range().b) stopAtEnd();
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+v.onended = stopAtEnd;
+
+$('exp').onclick = async () => {
+  if (!window.MediaRecorder || !c.captureStream) {
+    setStatus('Tu navegador no permite exportar. Prueba con Chrome, Edge o Firefox actualizados.');
+    return;
+  }
+  const mime = ['video/mp4;codecs=avc1', 'video/webm;codecs=vp9,opus', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));
+  const { a } = range();
+  v.pause();
+  if (Math.abs(v.currentTime - a) > 0.02) {
+    await new Promise(r => { v.onseeked = () => { v.onseeked = null; r(); }; v.currentTime = a; });
+  }
+  try { await v.play(); } catch (err) { setStatus('No se pudo reproducir el video para exportar.'); return; }
+  const stream = c.captureStream(30);
+  const cap = v.captureStream ? v.captureStream() : (v.mozCaptureStream ? v.mozCaptureStream() : null);
+  if (cap) cap.getAudioTracks().forEach(t => stream.addTrack(t));
+  const chunks = [];
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    exporting = false;
+    $('exp').disabled = false;
+    const type = rec.mimeType || 'video/webm';
+    const url = URL.createObjectURL(new Blob(chunks, { type }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'mi-video' + (type.includes('mp4') ? '.mp4' : '.webm');
+    link.click();
+    setStatus('Listo: tu video se descargó.');
+  };
+  exporting = true;
+  $('exp').disabled = true;
+  setStatus('Exportando... no cierres esta pestaña.');
+  rec.start();
+};
+</script>
+</body>
+</html>
